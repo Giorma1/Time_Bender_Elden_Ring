@@ -12,11 +12,24 @@
 using namespace ModUtils;
 using namespace mINI;
 
+// ---------- ACTION TYPE ----------
+enum class ActionType {
+    Toggle,
+    Hold
+};
+
+ActionType g_actionType = ActionType::Toggle;
+
 // ---------- TIMESCALE CONFIG ----------
 float g_timescaleF1 = 0.1f;
 float g_timescaleF2 = 0.3f;
 float g_timescaleF3 = 0.8f;
 float g_normalTimescale = 1.0f;
+
+// ---------- HOLD STATE ----------
+bool g_f1Held = false;
+bool g_f2Held = false;
+bool g_f3Held = false;
 
 // ---------- KEYBIND STRUCT ----------
 struct Keybind {
@@ -39,7 +52,6 @@ std::string GetDLLFolder(HINSTANCE hModule) {
     return full.substr(0, pos);
 }
 
-// Split string helper
 std::vector<std::string> splitString(const std::string& str, const std::string& delimiter) {
     size_t pos = 0;
     std::string s = str;
@@ -95,56 +107,39 @@ bool IsControllerComboPressed(const Keybind& kb) {
     return rtHeld;
 }
 
-// Read keybinds and timescale values from INI
+// ---------- CONFIG ----------
 void ReadConfig(const std::string& iniPath) {
     INIFile config(iniPath);
     INIStructure ini;
 
     if (config.read(ini)) {
-        // Timescale values
+
+        if (ini["Timescale"].has("Action_Type")) {
+            std::string mode = ini["Timescale"]["Action_Type"];
+            std::transform(mode.begin(), mode.end(), mode.begin(), ::tolower);
+            g_actionType = (mode == "hold") ? ActionType::Hold : ActionType::Toggle;
+        }
+
         if (ini["Timescale"].has("F1_Value")) g_timescaleF1 = std::stof(ini["Timescale"]["F1_Value"]);
         if (ini["Timescale"].has("F2_Value")) g_timescaleF2 = std::stof(ini["Timescale"]["F2_Value"]);
         if (ini["Timescale"].has("F3_Value")) g_timescaleF3 = std::stof(ini["Timescale"]["F3_Value"]);
         if (ini["Timescale"].has("Normal_Value")) g_normalTimescale = std::stof(ini["Timescale"]["Normal_Value"]);
 
-        // Keybinds
         if (ini["Timescale"].has("F1_Keys")) timescaleF1Keybinds = TranslateInput(ini["Timescale"]["F1_Keys"]);
         if (ini["Timescale"].has("F2_Keys")) timescaleF2Keybinds = TranslateInput(ini["Timescale"]["F2_Keys"]);
         if (ini["Timescale"].has("F3_Keys")) timescaleF3Keybinds = TranslateInput(ini["Timescale"]["F3_Keys"]);
         if (ini["Timescale"].has("Normal_Keys")) normalTimescaleKeybinds = TranslateInput(ini["Timescale"]["Normal_Keys"]);
     }
-    else {
-        // Create defaults if INI does not exist
-        ini["Timescale"]["F1_Value"] = "0.1";
-        ini["Timescale"]["F1_Keys"] = "f1, lthumbpress+xa";
-
-        ini["Timescale"]["F2_Value"] = "0.3";
-        ini["Timescale"]["F2_Keys"] = "f2, lthumbpress+xy";
-
-        ini["Timescale"]["F3_Value"] = "0.8";
-        ini["Timescale"]["F3_Keys"] = "f3, lthumbpress+xx";
-
-        ini["Timescale"]["Normal_Value"] = "1.0";
-        ini["Timescale"]["Normal_Keys"] = "f4, lthumbpress+xb";
-
-        config.write(ini, true);
-
-        g_timescaleF1 = 0.1f; timescaleF1Keybinds = TranslateInput(ini["Timescale"]["F1_Keys"]);
-        g_timescaleF2 = 0.3f; timescaleF2Keybinds = TranslateInput(ini["Timescale"]["F2_Keys"]);
-        g_timescaleF3 = 0.8f; timescaleF3Keybinds = TranslateInput(ini["Timescale"]["F3_Keys"]);
-        g_normalTimescale = 1.0f; normalTimescaleKeybinds = TranslateInput(ini["Timescale"]["Normal_Keys"]);
-    }
 }
 
-
-// Check if any keybind in list is pressed
-bool IsKeybindPressed(const std::vector<Keybind>& keybinds) {
+// ---------- INPUT CHECK (FIXED) ----------
+bool IsKeybindPressed(const std::vector<Keybind>& keybinds, bool held) {
     for (auto& kb : keybinds) {
         if (kb.isControllerKeybind) {
             if (IsControllerComboPressed(kb)) return true;
         }
         else {
-            if (AreKeysPressed(kb.keys, false)) return true;
+            if (AreKeysPressed(kb.keys, held)) return true;
         }
     }
     return false;
@@ -153,35 +148,51 @@ bool IsKeybindPressed(const std::vector<Keybind>& keybinds) {
 // ---------- MAIN THREAD ----------
 DWORD WINAPI MainThread(LPVOID lpParam) {
     HINSTANCE mod = (HINSTANCE)lpParam;
-    std::string dllFolder = GetDLLFolder(mod);
-    std::string iniPath = dllFolder + "\\timescale_keybinds.ini";
+    std::string iniPath = GetDLLFolder(mod) + "\\timescale_keybinds.ini";
 
-    Log("Loading config: %s", iniPath.c_str());
     ReadConfig(iniPath);
 
-    // ---------- FIND TIMESCALE POINTER ----------
     std::string aob = "48 8b 05 ?? ?? ?? ?? f3 0f 10 88 cc 02 00 00";
     uintptr_t instr = AobScan(aob);
-    if (!instr) { Log("AOB NOT FOUND!"); return 0; }
+    if (!instr) return 0;
 
     int32_t rel = *(int32_t*)(instr + 3);
     uintptr_t* pMgrPtr = (uintptr_t*)(instr + 7 + rel);
     while (*pMgrPtr == 0) Sleep(100);
 
     float* pTimescale = (float*)(*pMgrPtr + 0x2CC);
-    Log("Timescale float at: 0x%llX", (uintptr_t)pTimescale);
 
-    // ---------- MAIN LOOP ----------
     while (true) {
-        if (IsKeybindPressed(timescaleF1Keybinds)) *pTimescale = g_timescaleF1;
-        if (IsKeybindPressed(timescaleF2Keybinds)) *pTimescale = g_timescaleF2;
-        if (IsKeybindPressed(timescaleF3Keybinds)) *pTimescale = g_timescaleF3;
-        if (IsKeybindPressed(normalTimescaleKeybinds)) *pTimescale = g_normalTimescale;
+
+        bool wantHeld = (g_actionType == ActionType::Hold);
+
+        bool f1 = IsKeybindPressed(timescaleF1Keybinds, wantHeld);
+        bool f2 = IsKeybindPressed(timescaleF2Keybinds, wantHeld);
+        bool f3 = IsKeybindPressed(timescaleF3Keybinds, wantHeld);
+        bool normal = IsKeybindPressed(normalTimescaleKeybinds, false);
+
+        if (g_actionType == ActionType::Toggle) {
+
+            if (f1) *pTimescale = g_timescaleF1;
+            if (f2) *pTimescale = g_timescaleF2;
+            if (f3) *pTimescale = g_timescaleF3;
+            if (normal) *pTimescale = g_normalTimescale;
+
+        }
+        else { // HOLD MODE (FIXED)
+
+            if (f1) { *pTimescale = g_timescaleF1; g_f1Held = true; }
+            else if (g_f1Held) { *pTimescale = g_normalTimescale; g_f1Held = false; }
+
+            if (f2) { *pTimescale = g_timescaleF2; g_f2Held = true; }
+            else if (g_f2Held) { *pTimescale = g_normalTimescale; g_f2Held = false; }
+
+            if (f3) { *pTimescale = g_timescaleF3; g_f3Held = true; }
+            else if (g_f3Held) { *pTimescale = g_normalTimescale; g_f3Held = false; }
+        }
 
         Sleep(10);
     }
-
-    return 0;
 }
 
 // ---------- DLL ENTRY ----------
